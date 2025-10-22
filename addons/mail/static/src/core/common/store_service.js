@@ -1,6 +1,6 @@
 import { Store as BaseStore, fields, makeStore, storeInsertFns } from "@mail/core/common/record";
 import { threadCompareRegistry } from "@mail/core/common/thread_compare";
-import { cleanTerm, generateEmojisOnHtml, prettifyMessageContent } from "@mail/utils/common/format";
+import { cleanTerm, generateEmojisOnHtml, prettifyMessageText } from "@mail/utils/common/format";
 
 import { reactive } from "@odoo/owl";
 
@@ -198,7 +198,10 @@ export class Store extends BaseStore {
 
     shouldSimulateDarkTheme(ctx) {
         return (
-            (ctx?.env?.inDiscussCallView || ctx?.env?.inCallInvitation) &&
+            (ctx?.env?.inDiscussCallView ||
+                ctx?.env?.inCallInvitation ||
+                ctx?.env.isDiscussPipBanner ||
+                ctx?.env?.inWelcomePage) &&
             this.isOdooWhiteTheme &&
             !ctx?.env.inMeetingSideActions &&
             !ctx?.env.inDiscussActionPanel
@@ -453,7 +456,7 @@ export class Store extends BaseStore {
 
     /** Provides an override point for when the store service has started. */
     onStarted() {
-        this.isOdooWhiteTheme = cookie.get("color_scheme") !== "dark";
+        this.isOdooWhiteTheme = cookie.get("color_scheme") !== "dark" || this.inPublicPage;
         navigator.serviceWorker?.addEventListener("message", ({ data = {} }) => {
             const { type, payload } = data;
             if (type === "notification-display-request") {
@@ -465,7 +468,11 @@ export class Store extends BaseStore {
                 } catch {
                     // assumes tab not focused: parent.document from iframe triggers CORS error
                 }
-                if (isTabFocused && thread?.isDisplayed) {
+                // Prevent duplicate inbox push notifications since they're already handled by
+                // `mail.message/inbox` bus notifications, and the `modelsHandleByPush` heuristic
+                // in `out_of_focus_service.js` isn't reliable enough to detect these cases.
+                const isInbox = this.store.self.notification_preference === "inbox" && model !== "discuss.channel";
+                if ((isTabFocused && thread?.isDisplayed) || isInbox) {
                     navigator.serviceWorker.controller?.postMessage({
                         type: "notification-display-response",
                         payload: { correlationId },
@@ -733,7 +740,7 @@ export class Store extends BaseStore {
             ...thread.getFetchParams(),
             fetch_params: {
                 is_notification,
-                search_term: await prettifyMessageContent(searchTerm), // formatted like message_post
+                search_term: await prettifyMessageText(searchTerm), // formatted like message_post
                 before,
             },
         });

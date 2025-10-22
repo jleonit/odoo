@@ -1,6 +1,9 @@
 import { expect, test } from "@odoo/hoot";
 import { contains } from "@web/../tests/web_test_helpers";
-import { defineWebsiteModels, setupWebsiteBuilder } from "@website/../tests/builder/website_helpers";
+import {
+    defineWebsiteModels,
+    setupWebsiteBuilder,
+} from "@website/../tests/builder/website_helpers";
 import { waitFor } from "@odoo/hoot-dom";
 
 defineWebsiteModels();
@@ -107,8 +110,7 @@ async function setupWebsiteAndOpenParallaxOptions({ editingElClasses = "" } = {}
         <section ${editingElClass} style="background-image: ${backgroundImageUrl}; width: 500px; height:500px">
         </section>`);
     await contains(":iframe section").click();
-    // Timeout: Images are fetched from the network for some values in the
-    // options, the normal timeout is sometimes too short
-    await contains("[data-label='Scroll Effect'] button.o-dropdown", { timeout: 1000 }).click();
+    await websiteBuilder.waitSidebarUpdated();
+    await contains("[data-label='Scroll Effect'] button.o-dropdown").click();
     return websiteBuilder;
 }

@@ -2,7 +2,6 @@ import { Reactive } from "@web/core/utils/reactive";
 import { ConnectionLostError, RPCError, rpc } from "@web/core/network/rpc";
 import { _t } from "@web/core/l10n/translation";
 import { formatCurrency as webFormatCurrency } from "@web/core/currency";
-import { attributeFormatter } from "@pos_self_order/app/utils";
 import { markup } from "@odoo/owl";
 import { useService } from "@web/core/utils/hooks";
 import { registry } from "@web/core/registry";
@@ -14,7 +13,12 @@ import { renderToElement } from "@web/core/utils/render";
 import { TimeoutPopup } from "@pos_self_order/app/components/timeout_popup/timeout_popup";
 import { NetworkConnectionLostPopup } from "@pos_self_order/app/components/network_connectionLost_popup/network_connectionLost_popup";
 import { UnavailableProductsDialog } from "@pos_self_order/app/components/unavailable_product_dialog/unavailable_product_dialog";
-import { constructFullProductName, deduceUrl, random5Chars } from "@point_of_sale/utils";
+import {
+    constructFullProductName,
+    deduceUrl,
+    random5Chars,
+    orderUsageUTCtoLocalUtil,
+} from "@point_of_sale/utils";
 import { getOrderLineValues } from "./card_utils";
 import {
     getTaxesAfterFiscalPosition,
@@ -164,8 +168,13 @@ export class SelfOrder extends Reactive {
     getAvailableCategories() {
         let now = luxon.DateTime.now();
         now = now.hour + now.minute / 60;
+        const isKiosk = this.config.self_ordering_mode === "kiosk";
         const availableCategories = this.productCategories
-            .filter((c) => this.productByCategIds[c.id]?.length > 0)
+            .filter(
+                (c) =>
+                    this.productByCategIds[c.id]?.length > 0 ||
+                    (isKiosk && c.child_ids.some((child) => child.id in this.productByCategIds))
+            )
             .sort((a, b) => a.sequence - b.sequence);
         return availableCategories.filter((c) => {
             const hourStart = c.hour_after;
@@ -201,8 +210,8 @@ export class SelfOrder extends Reactive {
                 access_token: this.access_token,
                 preset_id: this.currentOrder?.preset_id?.id,
             });
-
-            preset.computeAvailabilities(presetAvailabilities);
+            const localUsage = orderUsageUTCtoLocalUtil(presetAvailabilities.usage_utc);
+            preset.computeAvailabilities(localUsage);
         } catch {
             console.info("Offline mode, cannot update the slot avaibility");
         }
@@ -674,7 +683,6 @@ export class SelfOrder extends Reactive {
                 order_access_tokens: accessTokens,
                 table_identifier: tableIdentifier,
             });
-            this.selectedOrderUuid = null;
             const result = this.models.connectNewData(data);
             const openOrder = result["pos.order"]?.find((o) => o.state === "draft");
             if (openOrder && this.router.activeSlot !== "confirmation") {
@@ -839,20 +847,6 @@ export class SelfOrder extends Reactive {
 
     isTaxesIncludedInPrice() {
         return this.config.iface_tax_included === "total";
-    }
-    getSelectedAttributes(line) {
-        const attributeValues = line.attribute_value_ids;
-        const customAttr = line.custom_attribute_value_ids;
-        return attributeFormatter(
-            this.models["product.attribute"].getAllBy("id"),
-            attributeValues,
-            customAttr
-        );
-    }
-    getFullProductName(line) {
-        const attrs = this.getSelectedAttributes(line);
-        const attrsStr = " (" + attrs.map((a) => a.value).join(", ") + ")";
-        return line.full_product_name + (attrs.length ? attrsStr : "");
     }
     showDownloadButton(order) {
         return this.config.self_ordering_mode === "mobile" && order.state === "paid";
