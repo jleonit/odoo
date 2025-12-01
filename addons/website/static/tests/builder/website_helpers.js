@@ -148,6 +148,13 @@ export async function setupWebsiteBuilder(
             originalIframeLoaded = this.iframeLoaded;
             this.iframeLoaded = iframeLoaded;
         },
+        // Override for Firefox. Chrome doesn't load the initial iframe and
+        // never goes through this method. As Firefox does, it means it re-
+        // assigns `this.publicRootReady` to a deferred that is never resolved
+        // in tests, which prevents any Hoot builder test from working.
+        // Reimplement this method the day interactions within the iframe work
+        // with Hoot.
+        preparePublicRootReady() {},
         async loadAssetsEditBundle() {
             // To instantiate interactions in the iframe test we need to load
             // the frontend bundle in it. The problem is that Hoot does not have
@@ -270,7 +277,11 @@ export async function setupWebsiteBuilder(
 
 async function openBuilderSidebar(editAssetsLoaded) {
     // The next line allow us to await asynchronous fetches and cache them before it is used
-    await Promise.all([getWebsiteSnippets(), loadBundle("website.website_builder_assets")]);
+    await Promise.all([
+        getWebsiteSnippets(),
+        loadBundle("website.website_builder_assets"),
+        loadBundle("html_editor.assets_image_cropper"),
+    ]);
 
     await click(".o-website-btn-custo-primary");
     await editAssetsLoaded;
@@ -419,7 +430,16 @@ export async function setupWebsiteBuilderWithSnippet(snippetName, options = {}) 
 export async function getStructureSnippet(snippetName) {
     const html = await getWebsiteSnippets();
     const snippetsDocument = new DOMParser().parseFromString(html, "text/html");
-    return snippetsDocument.querySelector(`[data-snippet=${snippetName}]`).cloneNode(true);
+    const processors = registry.category("html_builder.snippetsPreprocessor").getAll();
+    for (const processor of Object.values(processors)) {
+        processor("website.snippets", snippetsDocument);
+    }
+    const snippetEl = snippetsDocument.querySelector(
+        `[data-snippet=${snippetName}]:not([data-snippet] [data-snippet])`
+    );
+    const el = snippetEl.cloneNode(true);
+    el.dataset.name = snippetEl.parentElement.getAttribute("name");
+    return el;
 }
 
 export async function insertStructureSnippet(editor, snippetName) {

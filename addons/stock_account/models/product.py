@@ -145,6 +145,7 @@ class ProductProduct(models.Model):
         for product in self:
             at_date = fields.Datetime.to_datetime(product.env.context.get('to_date'))
             if at_date:
+                at_date = at_date.replace(hour=23, minute=59, second=59)
                 product = product.with_context(at_date=at_date)
             valuated_product = product.sudo(False)._with_valuation_context()
             qty_available = valuated_product.qty_available
@@ -226,7 +227,10 @@ class ProductProduct(models.Model):
             return self.standard_price
         if (product_value and last_in and product_value.date > last_in.date) or not last_in:
             return product_value.value
-        return last_in._get_value(at_date=date) / last_in._get_valued_qty()
+        valued_qty = last_in._get_valued_qty()
+        if not valued_qty:
+            return self.standard_price
+        return last_in._get_value(at_date=date) / valued_qty
 
     def _get_value_from_lots(self):
         lots = self.env['stock.lot'].search([
@@ -289,7 +293,7 @@ class ProductProduct(models.Model):
         if at_date:
             product_value_domain &= Domain([('date', '<=', at_date)])
 
-        product_values = self.env['product.value'].search(product_value_domain, order="date, id")
+        product_values = self.env['product.value'].sudo().search(product_value_domain, order="date, id")
         avco_value = 0
         avco_total_value = 0
         moves = moves_in | moves_out
@@ -321,7 +325,7 @@ class ProductProduct(models.Model):
                     in_value = move._get_value(at_date=at_date)
                 if lot:
                     lot_qty = move._get_valued_qty(lot)
-                    in_value = in_value * lot_qty / in_qty
+                    in_value = (in_value * lot_qty / in_qty) if in_qty else 0
                     in_qty = lot_qty
                 if quantity < 0 and quantity + in_qty >= 0:
                     positive_qty = quantity + in_qty
@@ -336,7 +340,7 @@ class ProductProduct(models.Model):
                 out_value = out_qty * avco_value
                 if lot:
                     lot_qty = move._get_valued_qty(lot)
-                    out_value = out_value * lot_qty / out_qty
+                    out_value = (out_value * lot_qty / out_qty) if out_qty else 0
                     out_qty = lot_qty
                 avco_total_value -= out_value
                 quantity -= out_qty
@@ -393,8 +397,8 @@ class ProductProduct(models.Model):
         if lot:
             fifo_stack_size = lot.product_qty
         else:
-            fifo_stack_size = int(self._with_valuation_context().with_context(to_date=at_date).qty_available)
-        if fifo_stack_size <= 0:
+            fifo_stack_size = self._with_valuation_context().with_context(to_date=at_date).qty_available
+        if self.uom_id.compare(fifo_stack_size, 0) <= 0:
             return fifo_stack, 0
 
         moves_domain = Domain([
@@ -412,24 +416,21 @@ class ProductProduct(models.Model):
         else:
             moves_domain &= Domain([('is_in', '=', True)])
 
-        # Base limit to 100 to avoid issue with other UoM than Unit
-        initial_limit = fifo_stack_size * 10
-        unit_uom = self.env.ref('uom.product_uom_unit', raise_if_not_found=False)
-        if unit_uom and self.uom_id != unit_uom:
-            initial_limit = max(initial_limit, 100)
+        # Arbitrary limit as we can't guess how many moves correspond to the qty_available, but avoid fetching all moves at the same time.
+        initial_limit = 100
         moves_in = self.env['stock.move'].search(moves_domain, order='date desc, id desc', limit=initial_limit)
 
         remaining_qty_on_first_stack_move = 0
         current_offset = 0
         # Go to the bottom of the stack
-        while fifo_stack_size > 0 and moves_in:
+        while self.uom_id.compare(fifo_stack_size, 0) > 0 and moves_in:
             move = moves_in[0]
             moves_in = moves_in[1:]
             in_qty = move._get_valued_qty()
             fifo_stack.append(move)
             remaining_qty_on_first_stack_move = min(in_qty, fifo_stack_size)
             fifo_stack_size -= in_qty
-            if fifo_stack_size > 0 and not moves_in:
+            if self.uom_id.compare(fifo_stack_size, 0) > 0 and not moves_in:
                 # We need to fetch more moves
                 current_offset += 1
                 moves_in = self.env['stock.move'].search(moves_domain, order='date desc, id desc', offset=current_offset * initial_limit, limit=initial_limit)
@@ -450,7 +451,7 @@ class ProductProduct(models.Model):
                 continue
             new_standard_price = product._run_avco()[0]
             if new_standard_price:
-                product.with_context(disable_auto_revaluation=True).standard_price = new_standard_price
+                product.with_context(disable_auto_revaluation=True).sudo().standard_price = new_standard_price
 
 
 class ProductCategory(models.Model):

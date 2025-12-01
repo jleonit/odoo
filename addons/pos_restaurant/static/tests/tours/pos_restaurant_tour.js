@@ -638,6 +638,31 @@ registry.category("web_tour.tours").add("test_preset_timing_restaurant", {
         ].flat(),
 });
 
+registry.category("web_tour.tours").add("test_open_register_with_preset_takeaway", {
+    steps: () =>
+        [
+            Chrome.startPoS(),
+            FloorScreen.isShown(),
+            FloorScreen.clickTable("5"),
+            Chrome.endTour(),
+        ].flat(),
+});
+
+registry.category("web_tour.tours").add("RestaurantPresetEatInTour", {
+    steps: () =>
+        [
+            Chrome.startPoS(),
+            Dialog.confirm("Open Register"),
+            FloorScreen.clickTable("4"),
+            ProductScreen.clickDisplayedProduct("Coca-Cola", true),
+            ProductScreen.clickPayButton(false),
+            ProductScreen.discardOrderWarningDialog(),
+            PaymentScreen.clickPaymentMethod("Cash"),
+            PaymentScreen.clickValidate(),
+            ReceiptScreen.cashierNameExists("test_user"),
+        ].flat(),
+});
+
 registry.category("web_tour.tours").add("test_combo_preparation_receipt_layout", {
     steps: () =>
         [
@@ -1127,5 +1152,22 @@ registry.category("web_tour.tours").add("test_guest_count_bank_payment", {
             PaymentScreen.clickPaymentMethod("Bank"),
             PaymentScreen.clickBackToProductScreen(),
             ProductScreen.isShown(),
+        ].flat(),
+});
+
+registry.category("web_tour.tours").add("test_name_preset_skip_screen", {
+    steps: () =>
+        [
+            Chrome.startPoS(),
+            Dialog.confirm("Open Register"),
+            FloorScreen.clickTable("5"),
+            ProductScreen.clickDisplayedProduct("Coca-Cola"),
+            ProductScreen.clickPartnerButton(),
+            ProductScreen.clickCustomer("Deco Addict"),
+            ProductScreen.clickPayButton(false),
+            ProductScreen.discardOrderWarningDialog(),
+            PaymentScreen.clickPaymentMethod("Cash"),
+            PaymentScreen.clickValidate(),
+            ReceiptScreen.clickNextOrder(),
         ].flat(),
 });

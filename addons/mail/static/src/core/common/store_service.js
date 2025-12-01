@@ -1,6 +1,7 @@
 import { Store as BaseStore, fields, makeStore, storeInsertFns } from "@mail/core/common/record";
 import { threadCompareRegistry } from "@mail/core/common/thread_compare";
 import { cleanTerm, generateEmojisOnHtml, prettifyMessageText } from "@mail/utils/common/format";
+import { compareDatetime } from "@mail/utils/common/misc";
 
 import { reactive } from "@odoo/owl";
 
@@ -217,6 +218,15 @@ export class Store extends BaseStore {
         return res.join(" ");
     }
 
+    standaloneInboxMessages = fields.Many("mail.message", {
+        compute() {
+            const messages = this.store.inbox.messages.filter((m) => !m.thread);
+            return messages.sort(
+                (m1, m2) => compareDatetime(m2.datetime, m1.datetime) || m2.id - m1.id
+            );
+        },
+    });
+
     /**
      * @param {Object} params post message data
      * @param {import("models").Message} tmpMessage the associated temporary message
@@ -355,13 +365,9 @@ export class Store extends BaseStore {
     }
 
     _fetchStoreDataRpc(fetchParams) {
-        const context = {
-            ...user.context,
-            allowed_company_ids: user.allowedCompanies.map((c) => c.id),
-        };
         return rpc(
             this.fetchReadonly ? "/mail/data" : "/mail/action",
-            { fetch_params: fetchParams, context },
+            { fetch_params: fetchParams, context: user.context },
             { silent: this.fetchSilent }
         );
     }

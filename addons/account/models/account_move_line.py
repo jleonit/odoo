@@ -417,6 +417,7 @@ class AccountMoveLine(models.Model):
     analytic_distribution = fields.Json(
         inverse="_inverse_analytic_distribution",
     ) # add the inverse function used to trigger the creation/update of the analytic lines accordingly (field originally defined in the analytic mixin)
+    has_invalid_analytics = fields.Boolean(compute='_compute_has_invalid_analytics')
 
     # === Early Pay fields === #
     discount_date = fields.Date(
@@ -685,7 +686,7 @@ class AccountMoveLine(models.Model):
         for line in self:
             if not line.company_id.account_storno:
                 continue
-            line.is_storno = line.is_storno or line.move_id.is_storno
+            line.is_storno = (line.is_storno or line.move_id.is_storno) and line.move_type not in ('in_invoice', 'out_invoice')
 
             # For invoice lines, we want to set is_storno based on the sign of the line if the entire move is not storno (not refund)
             # This allows setting is_storno to true or false depending on quantity and price_unit
@@ -1266,6 +1267,7 @@ class AccountMoveLine(models.Model):
                 line.display_type == 'product' and line.move_id.is_invoice(True)
             ))
 
+    # TODO: delete in master
     @api.onchange('amount_currency', 'currency_id')
     def _inverse_amount_currency(self):
         for line in self:
@@ -1339,7 +1341,7 @@ class AccountMoveLine(models.Model):
             account = line.account_id
             journal = line.move_id.journal_id
 
-            if not account.active and not self.env.context.get('skip_account_deprecation_check'):
+            if not (account.active or line.is_imported or self.env.context.get('skip_account_deprecation_check')):
                 raise UserError(_('The account %(name)s (%(code)s) is archived.', name=account.name, code=account.code))
 
             account_currency = account.currency_id
@@ -1898,6 +1900,31 @@ class AccountMoveLine(models.Model):
     def _compute_display_name(self):
         for line in self:
             line.display_name = line._format_aml_name(line.name or line.product_id.display_name, line.ref, line.move_id.name)
+
+    @api.depends('account_id', 'company_id', 'move_id', 'product_id', 'display_type', 'analytic_distribution')
+    def _compute_has_invalid_analytics(self):
+        SKIPPED_ACCOUNT_TYPES = {'asset_receivable', 'liability_payable', 'asset_cash', 'liability_credit_card'}
+        lines_to_validate = self.filtered(lambda line: (
+            line.display_type == 'product' and
+            line.account_id.account_type not in SKIPPED_ACCOUNT_TYPES
+        ))
+        (self - lines_to_validate).has_invalid_analytics = False
+        for line in lines_to_validate:
+            line.has_invalid_analytics = False
+            try:
+                business_domain = (
+                    'invoice' if line.move_id.is_sale_document(True)
+                    else 'bill' if line.move_id.is_purchase_document(True)
+                    else 'general'
+                )
+                line.with_context(validate_analytic=True)._validate_distribution(
+                    company_id=line.company_id.id,
+                    product=line.product_id.id,
+                    account=line.account_id.id,
+                    business_domain=business_domain,
+                )
+            except ValidationError:
+                line.has_invalid_analytics = True
 
     def copy_data(self, default=None):
         vals_list = super().copy_data(default=default)
@@ -2698,11 +2725,21 @@ class AccountMoveLine(models.Model):
 
         # ==== Create the partial exchange journal entries ====
         exchange_moves = self._create_exchange_difference_moves(exchange_diff_values_list)
+        used_exchange_moves = set()
+        used_partials = set()
+
         for partial in partials:
             for exchange_move in exchange_moves:
                 linked_move_lines = exchange_move.line_ids.reconciled_lines_ids
-                if any(line == partial.debit_move_id or line == partial.credit_move_id for line in linked_move_lines):
+
+                if (
+                    any(line == partial.debit_move_id or line == partial.credit_move_id for line in linked_move_lines)
+                    and exchange_move not in used_exchange_moves
+                    and partial not in used_partials
+                ):
                     partial.exchange_move_id = exchange_move
+                    used_exchange_moves.add(exchange_move)
+                    used_partials.add(partial)
 
         # ==== Create entries for cash basis taxes ====
         def is_cash_basis_needed(amls):
@@ -2991,6 +3028,10 @@ class AccountMoveLine(models.Model):
                         account.reconcile = True
                     lines.with_context(no_exchange_difference=True, no_cash_basis=True).reconcile()
 
+    def _get_matched_move_ids(self):
+        """ Return a record set with both self.matched_debit_ids & self.matched_credit_ids """
+        return self.matched_debit_ids | self.matched_credit_ids
+
     # -------------------------------------------------------------------------
     # ANALYTIC
     # -------------------------------------------------------------------------
@@ -3050,7 +3091,7 @@ class AccountMoveLine(models.Model):
             distribution_on_each_plan = {}
             for account_ids, distribution in self.analytic_distribution.items():
                 line_values = self._prepare_analytic_distribution_line(float(distribution), account_ids, distribution_on_each_plan)
-                if not self.currency_id.is_zero(line_values.get('amount')):
+                if not self.company_currency_id.is_zero(line_values.get('amount')):
                     analytic_line_vals.append(line_values)
 
             self._round_analytic_distribution_line(analytic_line_vals)
@@ -3111,17 +3152,17 @@ class AccountMoveLine(models.Model):
 
         rounding_error = 0
         for line in analytic_lines_vals:
-            rounded_amount = self.company_id.currency_id.round(line['amount'])
+            rounded_amount = self.company_currency_id.round(line['amount'])
             rounding_error += rounded_amount - line['amount']
             line['amount'] = rounded_amount
 
         # distributing the rounding error
         for line in analytic_lines_vals:
-            if self.currency_id.is_zero(rounding_error):
+            if self.company_currency_id.is_zero(rounding_error):
                 break
             amt = max(
-                self.currency_id.rounding,
-                abs(self.currency_id.round(rounding_error / len(analytic_lines_vals)))
+                self.company_currency_id.rounding,
+                abs(self.company_currency_id.round(rounding_error / len(analytic_lines_vals)))
             )
             if rounding_error < 0.0:
                 line['amount'] += amt
@@ -3233,7 +3274,9 @@ class AccountMoveLine(models.Model):
 
         Uses a mapping built with `_reconciled_by_number` to avoid multiple calls to the database.
         """
-        matching_numbers = [n for n in set(self.mapped('matching_number')) if n]
+        # We ignore Import matching numbers as they are not truly reconciled yet
+        matching_numbers = [n for n in set(self.mapped('matching_number')) if n and not n.startswith('I')]
+
         return self | self.browse([_id for number in matching_numbers for _id in mapping[number].ids])
 
     def _all_reconciled_lines(self):

@@ -617,6 +617,17 @@ class TestFrontend(TestFrontendCommon):
             'use_guest': True,
         })
         self.start_pos_tour('test_guest_count_bank_payment')
+        self.main_pos_config.write({'default_preset_id': self.preset_takeaway.id})
+        self.start_pos_tour('test_open_register_with_preset_takeaway')
+
+    def test_restaurant_preset_eatin_tour(self):
+        self.pos_config.write({
+            'use_presets': True,
+            'default_preset_id': self.env.ref('pos_restaurant.pos_takein_preset', False).id,
+        })
+        self.pos_user.name = "test_user"
+        self.pos_config.with_user(self.pos_user).open_ui()
+        self.start_pos_tour('RestaurantPresetEatInTour', login="pos_user")
 
     def test_combo_preparation_receipt_layout(self):
         setup_product_combo_items(self)
@@ -771,3 +782,16 @@ class TestFrontend(TestFrontendCommon):
         self.pos_config.is_order_printer = False
         self.pos_config.with_user(self.pos_user).open_ui()
         self.start_pos_tour('test_combo_synchronisation')
+
+    def test_name_preset_skip_screen(self):
+        self.preset_takeaway = self.env['pos.preset'].create({
+            'name': 'Takeaway',
+            'identification': 'name',
+        })
+        self.pos_config.write({
+            'use_presets': True,
+            'default_preset_id': self.preset_takeaway.id,
+            'available_preset_ids': [(6, 0, [self.preset_takeaway.id])],
+        })
+        self.pos_config.with_user(self.pos_user).open_ui()
+        self.start_pos_tour('test_name_preset_skip_screen')

@@ -15,6 +15,12 @@ import { callbacksForCursorUpdate } from "@html_editor/utils/selection";
  */
 
 /**
+ * @typedef {((node: Node) => boolean)[]} legit_feff_predicates
+ * @typedef {((root: EditorContext["editable"], cursors: Cursors) => Node[])[]} feff_providers
+ * @typedef {(() => string)[]} selectors_for_feff_providers
+ */
+
+/**
  * This plugin manages the insertion and removal of the zero-width no-break
  * space character (U+FEFF). These characters enable the user to place the
  * cursor in positions that would otherwise not be easy or possible, such as
@@ -26,6 +32,7 @@ export class FeffPlugin extends Plugin {
     static dependencies = ["selection"];
     static shared = ["addFeff", "removeFeffs", "surroundWithFeffs"];
 
+    /** @type {import("plugins").EditorResources} */
     resources = {
         normalize_handlers: this.updateFeffs.bind(this),
         clean_for_save_handlers: this.cleanForSave.bind(this),
@@ -34,6 +41,7 @@ export class FeffPlugin extends Plugin {
             char === "\uFEFF" && (ev.shiftKey || lastSkipped !== "\uFEFF"),
         clipboard_content_processors: this.processContentForClipboard.bind(this),
         clipboard_text_processors: (text) => text.replace(/\ufeff/g, ""),
+        before_split_around_until_handlers: (root) => this.cleanForSave({ root, preserveSelection: true }),
     };
 
     cleanForSave({ root, preserveSelection = false }) {
