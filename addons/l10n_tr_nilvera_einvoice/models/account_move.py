@@ -5,6 +5,7 @@ from urllib.parse import quote, urlencode, urlparse
 from odoo import _, api, fields, models
 from odoo.exceptions import UserError
 from odoo.tools import SQL
+from odoo.addons.l10n_tr_nilvera.const import NILVERA_ERROR_CODE_MESSAGES
 from odoo.addons.l10n_tr_nilvera.lib.nilvera_client import _get_nilvera_client
 
 MOVE_TYPE_CATEGORY_MAP = {
@@ -32,7 +33,6 @@ class AccountMove(models.Model):
         string="Nilvera Document UUID",
         copy=False,
         readonly=True,
-        default=lambda self: str(uuid.uuid4()),
         help="Universally unique identifier of the Invoice",
     )
 
@@ -81,14 +81,20 @@ class AccountMove(models.Model):
 
     def button_draft(self):
         # EXTENDS account
-        for move in self:
-            if (
-                not move.company_id.l10n_tr_nilvera_use_test_env
-                and move.l10n_tr_nilvera_uuid
-                and move.l10n_tr_nilvera_send_status != 'not_sent'
-            ):
+        for move in self.filtered('l10n_tr_nilvera_uuid'):
+            if move.l10n_tr_nilvera_send_status == 'error':
+                move.message_post(body=_("To preserve accounting integrity and comply with legal requirements, invoices cannot be reused once an error occurs. Please create a new invoice to continue."))
+            elif move.l10n_tr_nilvera_send_status != 'not_sent':
                 raise UserError(_("You cannot reset to draft an entry that has been sent to Nilvera."))
         super().button_draft()
+
+    def _post(self, soft=True):
+        for move in self:
+            if move.l10n_tr_nilvera_send_status == 'error' and move.l10n_tr_nilvera_uuid:
+                raise UserError(_("To preserve accounting integrity and comply with legal requirements, invoices cannot be reused once an error occurs. Please create a new invoice to continue."))
+            if move.country_code == 'TR' and not move.l10n_tr_nilvera_uuid:
+                move.l10n_tr_nilvera_uuid = str(uuid.uuid4())
+        return super()._post(soft=soft)
 
     def _l10n_tr_nilvera_submit_einvoice(self, xml_file, customer_alias):
         self._l10n_tr_nilvera_submit_document(
@@ -340,9 +346,12 @@ class AccountMove(models.Model):
         response_json = response.json()
         if errors := response_json.get('Errors'):
             msg += _("The invoice couldn't be sent due to the following errors:\n")
+
             for error in errors:
-                msg += "%s - %s: %s\n" % (error.get('Code'), error.get('Description'), error.get('Detail'))
-                error_codes.append(error.get('Code'))
+                code = error.get('Code')
+                description = NILVERA_ERROR_CODE_MESSAGES.get(code, error.get('Description'))
+                msg += "\n%s - %s:\n%s\n" % (code, description, error.get('Detail'))
+                error_codes.append(code)
 
         return msg, error_codes
 

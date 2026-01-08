@@ -1758,6 +1758,17 @@ class AccountTax(models.Model):
             special_mode=base_line['special_mode'],
             filter_tax_function=base_line['filter_tax_function'],
         )
+
+        # Only python side for professional with reverse charge
+        if base_line['special_type'] == 'non_deductible':
+            taxes_data = taxes_computation['taxes_data']
+            taxes_computation['taxes_data'] = []
+            for tax_data in taxes_data:
+                if not tax_data.get('is_reverse_charge'):
+                    taxes_computation['taxes_data'].append(tax_data)
+                else:
+                    taxes_computation['total_included'] -= tax_data['tax_amount']
+
         rate = base_line['rate']
         tax_details = base_line['tax_details'] = {
             'raw_total_excluded_currency': taxes_computation['total_excluded'],
@@ -2397,7 +2408,7 @@ class AccountTax(models.Model):
                 tax_rep_data = {
                     'tax_rep': tax_rep,
                     'tax_amount_currency': currency.round(tax_amount_currency * tax_rep.factor * tax_rep_sign),
-                    'tax_amount': currency.round(tax_data['tax_amount'] * tax_rep.factor * tax_rep_sign),
+                    'tax_amount': company_currency.round(tax_data['tax_amount'] * tax_rep.factor * tax_rep_sign),
                     'account': tax_rep._get_aml_target_tax_account(force_caba_exigibility=include_caba_tags) or base_line['account_id'],
                 }
                 total_tax_rep_amounts['tax_amount_currency'] += tax_rep_data['tax_amount_currency']
@@ -3359,16 +3370,15 @@ class AccountTax(models.Model):
         new_tax_details_list = self._split_tax_details(base_line, company, target_factors)
 
         # Split 'base_line'.
-        new_base_lines = []
-        for (_index, factor), new_tax_details, target_factor in zip(factors, new_tax_details_list, target_factors):
+        new_base_lines = [None] * len(factors)
+        for (index, factor), new_tax_details, target_factor in zip(factors, new_tax_details_list, target_factors):
             kwargs = {
                 'price_unit': factor * base_line['price_unit'],
                 'tax_details': new_tax_details,
             }
             if populate_function:
                 populate_function(base_line, target_factor, kwargs)
-            new_base_line = self._prepare_base_line_for_taxes_computation(base_line, **kwargs)
-            new_base_lines.append(new_base_line)
+            new_base_lines[index] = self._prepare_base_line_for_taxes_computation(base_line, **kwargs)
         return new_base_lines
 
     @api.model
@@ -4219,14 +4229,7 @@ class AccountTax(models.Model):
                 taxes += gb_tax_data['tax']
             taxes = taxes.filtered(lambda tax: tax._can_be_discounted())
 
-            # Compute the raw totals implied by the base line.
-            raw_total_amount_currency = tax_details['raw_total_excluded_currency']
-            for gb_tax_data in taxes_data:
-                raw_total_amount_currency += gb_tax_data['raw_tax_amount_currency']
-
             discount_data = discount_data_per_taxes.setdefault(taxes, {
-                'raw_total_amount_currency': 0.0,
-                'base_lines_raw_total_amount_currency': [],
                 'base_lines': [],
                 'discount_base_lines': [],
             })
@@ -4239,27 +4242,17 @@ class AccountTax(models.Model):
             if base_line['special_type'] == 'global_discount':
                 discount_data['discount_base_lines'].append(new_base_line)
             else:
-                discount_data['raw_total_amount_currency'] += raw_total_amount_currency
                 discount_data['base_lines'].append(new_base_line)
-                discount_data['base_lines_raw_total_amount_currency'].append(raw_total_amount_currency)
             new_base_lines.append(new_base_line)
 
         # Split the discount base line accross the others.
         for discount_data in discount_data_per_taxes.values():
-            sum_raw_total_amount_currency = discount_data['raw_total_amount_currency']
             discount_data['target_factors'] = [
                 {
                     'base_line': base_line,
-                    'factor': (
-                        abs(raw_total_amount_currency / sum_raw_total_amount_currency)
-                        if sum_raw_total_amount_currency
-                        else 0.0
-                    ),
+                    'factor': base_line['tax_details']['raw_total_excluded_currency'],
                 }
-                for base_line, raw_total_amount_currency in zip(
-                    discount_data['base_lines'],
-                    discount_data['base_lines_raw_total_amount_currency'],
-                )
+                for base_line in discount_data['base_lines']
             ]
             if discount_data['target_factors']:
                 dispatched_neg_base_lines += discount_data['discount_base_lines']
@@ -4771,44 +4764,50 @@ class AccountTax(models.Model):
     def compute_all(self, price_unit, currency=None, quantity=1.0, product=None, partner=None, is_refund=False, handle_price_include=True, include_caba_tags=False, rounding_method=None):
         """Compute all information required to apply taxes (in self + their children in case of a tax group).
         We consider the sequence of the parent for group of taxes.
-            Eg. considering letters as taxes and alphabetic order as sequence :
+        Eg. considering letters as taxes and alphabetic order as sequence::
+
             [G, B([A, D, F]), E, C] will be computed as [A, D, F, C, E, G]
-
-
 
         :param price_unit: The unit price of the line to compute taxes on.
         :param currency: The optional currency in which the price_unit is expressed.
         :param quantity: The optional quantity of the product to compute taxes on.
         :param product: The optional product to compute taxes on.
             Used to get the tags to apply on the lines.
+
         :param partner: The optional partner compute taxes on.
             Used to retrieve the lang to build strings and for potential extensions.
+
         :param is_refund: The optional boolean indicating if this is a refund.
         :param handle_price_include: Used when we need to ignore all tax included in price. If False, it means the
             amount passed to this method will be considered as the base of all computations.
+
         :param include_caba_tags: The optional boolean indicating if CABA tags need to be taken into account.
-        :return: {
-            'total_excluded': 0.0,    # Total without taxes
-            'total_included': 0.0,    # Total with taxes
-            'total_void'    : 0.0,    # Total with those taxes, that don't have an account set
-            'base_tags: : list<int>,  # Tags to apply on the base line
-            'taxes': [{               # One dict for each tax in self and their children
-                'id': int,
-                'name': str,
-                'amount': float,
-                'base': float,
-                'sequence': int,
-                'account_id': int,
-                'refund_account_id': int,
-                'analytic': bool,
-                'price_include': bool,
-                'tax_exigibility': str,
-                'tax_repartition_line_id': int,
-                'group': recordset,
-                'tag_ids': list<int>,
-                'tax_ids': list<int>,
-            }],
-        } """
+        :returns:
+            ::
+
+                {
+                    'total_excluded': 0.0,    # Total without taxes
+                    'total_included': 0.0,    # Total with taxes
+                    'total_void'    : 0.0,    # Total with those taxes, that don't have an account set
+                    'base_tags: : list<int>,  # Tags to apply on the base line
+                    'taxes': [{               # One dict for each tax in self and their children
+                        'id': int,
+                        'name': str,
+                        'amount': float,
+                        'base': float,
+                        'sequence': int,
+                        'account_id': int,
+                        'refund_account_id': int,
+                        'analytic': bool,
+                        'price_include': bool,
+                        'tax_exigibility': str,
+                        'tax_repartition_line_id': int,
+                        'group': recordset,
+                        'tag_ids': list<int>,
+                        'tax_ids': list<int>,
+                    }],
+                }
+        """
         if not self:
             company = self.env.company
         else:

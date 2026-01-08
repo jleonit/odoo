@@ -1055,14 +1055,10 @@ class AccountMove(models.Model):
             return (currency_priority, not bank.allow_out_payment)
 
         for move in self:
-            if (
+            if move.is_inbound() and (
                 payment_method := (
                     move.preferred_payment_method_line_id
-                    or (
-                        move.bank_partner_id.property_inbound_payment_method_line_id
-                        if move.is_inbound()
-                        else move.bank_partner_id.property_outbound_payment_method_line_id
-                    )
+                    or move.bank_partner_id.property_inbound_payment_method_line_id
                 )
             ) and payment_method.journal_id:
                 move.partner_bank_id = payment_method.journal_id.bank_account_id
@@ -1588,6 +1584,7 @@ class AccountMove(models.Model):
             rate=rate,
             sign=sign,
             special_mode=False if is_invoice else 'total_excluded',
+            name=product_line.name,
         )
 
     def _prepare_epd_base_line_for_taxes_computation(self, epd_line):
@@ -4774,6 +4771,24 @@ class AccountMove(models.Model):
             if not existing_lines:
                 self.with_context(default_move_type=self.move_type)._link_bill_origin_to_purchase_orders(timeout=4)
 
+        if new and res:
+            try:
+                attachments = self._from_files_data(files_data + self._unwrap_attachments(files_data))
+                self.journal_id._notify_invoice_subscribers(
+                    invoice=self,
+                    mail_params={
+                        'attachment_ids': [
+                            Command.create({
+                                'name': f"MAIL_{attachment['name']}",
+                                'mimetype': attachment['mimetype'],
+                                'raw': attachment['raw'],
+                            }) for attachment in attachments
+                        ]
+                    },
+                )
+            except Exception:
+                _logger.exception("Failed to notify invoice subscribers after EDI import.")
+
         return res
 
     @contextmanager
@@ -5749,7 +5764,22 @@ class AccountMove(models.Model):
         }
 
     def action_update_fpos_values(self):
-        self.invoice_line_ids._compute_price_unit()
+        lines_to_recompute = self.env['account.move.line']
+        for line in self.invoice_line_ids:
+            if line.display_type in ('line_section', 'line_note'):
+                continue
+            if not line.price_unit:
+                lines_to_recompute |= line
+                continue
+            new_taxes = line._get_computed_taxes()
+            if line.tax_ids.filtered('price_include') != new_taxes.filtered('price_include'):
+                line.price_unit = line.product_id._get_tax_included_unit_price_from_price(
+                    line.price_unit,
+                    line.tax_ids,
+                    fiscal_position=line.move_id.fiscal_position_id,
+                    product_taxes_after_fp=new_taxes,
+                )
+        lines_to_recompute._compute_price_unit()
         self.invoice_line_ids._compute_tax_ids()
         self.line_ids._compute_account_id()
 
@@ -6819,8 +6849,6 @@ class AccountMove(models.Model):
         )
         move = super(AccountMove, move_ctx).message_new(msg_dict, custom_values=values)
         move._compute_name()  # because the name is given, we need to recompute in case it is the first invoice of the journal
-
-        move.journal_id._notify_einvoices_received(move)
 
         return move
 
