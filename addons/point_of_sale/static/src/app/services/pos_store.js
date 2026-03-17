@@ -743,6 +743,13 @@ export class PosStore extends WithLazyGetterTrap {
             let product;
             if (opts.code) {
                 product = this.models["product.product"].getBy("barcode", opts.code.base_code);
+                if (!product) {
+                    const productPackaging = this.models["product.uom"].getBy(
+                        "barcode",
+                        opts.code.base_code
+                    );
+                    product = productPackaging && productPackaging.product_id;
+                }
             } else {
                 product = opts.presetVariant;
             }
@@ -988,7 +995,9 @@ export class PosStore extends WithLazyGetterTrap {
                 selectedOrderline,
                 related_lines
             );
-            related_lines.forEach((line) => line.setUnitPrice(price));
+            related_lines
+                .filter((line) => line.price_type !== "manual")
+                .forEach((line) => line.setUnitPrice(price));
         }
 
         if (configure) {
