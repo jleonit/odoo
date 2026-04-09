@@ -8,6 +8,7 @@ import { DIRECTIONS, leftPos, nodeSize, rightPos } from "@html_editor/utils/posi
 import { EMAIL_REGEX, URL_REGEX, cleanZWChars, deduceURLfromText } from "./utils";
 import {
     isElement,
+    isPhrasingContent,
     isProtected,
     isProtecting,
     isVisible,
@@ -206,7 +207,7 @@ export class LinkPlugin extends Plugin {
 
         toolbar_groups: [
             withSequence(40, { id: "link", namespaces: ["compact", "expanded"] }),
-            withSequence(30, { id: "image_link", namespaces: ["image"] }),
+            withSequence(30, { id: "image_link", namespaces: ["image", "icon"] }),
         ],
         toolbar_items: [
             {
@@ -503,7 +504,7 @@ export class LinkPlugin extends Plugin {
         }
 
         const selectionTextContent = selection?.textContent();
-        const isImage = !!findInSelection(selection, "img");
+        const isImage = !!findInSelection(selection, "img, .fa");
 
         const applyCallback = (
             url,
@@ -711,7 +712,7 @@ export class LinkPlugin extends Plugin {
                     link.setAttribute("style", saveCustomStyle);
                 }
                 // Remove the current link (linkInDocument) if it has no content
-                if (cleanZWChars(link.textContent) === "" && !link.querySelector("img")) {
+                if (cleanZWChars(link.textContent) === "" && !link.querySelector("img, .fa")) {
                     const [anchorNode, anchorOffset] = rightPos(link);
                     // We force the cursor after the link before removing the link
                     // to ensure we don't lose the selection position.
@@ -742,7 +743,7 @@ export class LinkPlugin extends Plugin {
             // create a font tag inside it, and move the color to the font tag.
             // This ensures the color is applied to the font element instead of
             // the anchor element itself.
-            if (color && childNodes.every((n) => !isBlock(n))) {
+            if (color && childNodes.every(isPhrasingContent)) {
                 anchorEl.style.removeProperty("color");
                 const font = selectElements(anchorEl, "font").next().value;
                 if (font && cleanZWChars(anchorEl.textContent) === font.textContent) {
@@ -826,7 +827,7 @@ export class LinkPlugin extends Plugin {
         } else if (!selection.isCollapsed) {
             // Open the link tool only if we have an image selected and the selection
             // is fully contained in the image parent link.
-            const imageNode = findInSelection(selection, "img");
+            const imageNode = findInSelection(selection, "img, .fa");
             const parentElement = imageNode?.parentElement;
             const linkContainingImage = imageNode && closestElement(imageNode, "a");
             if (
@@ -1308,7 +1309,10 @@ export class LinkPlugin extends Plugin {
                     }
                 ),
                 isAvailable: link_popover.isAvailable,
-                getProps: link_popover.getProps,
+                getProps: (...args) => ({
+                    ...link_popover.getProps(...args),
+                    publicAttachments: this.config.publicAttachments,
+                }),
             });
         });
     }
