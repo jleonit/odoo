@@ -328,6 +328,7 @@ class PosConfig(models.Model):
             'primaryTextColor': self.env.company.email_primary_color,
         }
         record['_self_order_pos'] = True
+        record['_base_url'] = config.get_base_url()
         return read_records
 
     def load_self_data(self):
@@ -415,7 +416,7 @@ class PosConfig(models.Model):
         return self.self_ordering_url
 
     def _supported_kiosk_payment_terminal(self):
-        return ['adyen', 'razorpay', 'stripe', 'pine_labs']
+        return ['adyen', 'razorpay', 'stripe', 'pine_labs', 'viva_com']
 
     def has_valid_self_payment_method(self):
         """ Checks if the POS config has a valid payment method (terminal or online). """

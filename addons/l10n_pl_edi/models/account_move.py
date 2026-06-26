@@ -5,6 +5,7 @@ from xml.dom.minidom import parseString
 from dateutil.relativedelta import relativedelta
 from lxml import etree
 from stdnum.pl.nip import compact
+from decimal import Decimal
 
 from odoo import Command, api, fields, models
 from odoo.exceptions import UserError
@@ -136,6 +137,12 @@ class AccountMove(models.Model):
                 return False
             return vat[:2].upper()
 
+        def get_vat_number(vat):
+            vat_country, vat_number = self.env['res.partner']._split_vat(vat)
+            if vat_country == 'PL':
+                return compact(vat)
+            return vat_number
+
         def get_address(partner):
             return re.sub(r'\n+', r' ', partner._display_address(True))
 
@@ -155,6 +162,12 @@ class AccountMove(models.Model):
             conversion_line = self.invoice_line_ids.sorted(lambda line: abs(line.balance), reverse=True)[0] if self.invoice_line_ids else None
             conversion_rate = abs(conversion_line.balance / conversion_line.amount_currency) if self.currency_id != self.env.ref('base.PLN') and conversion_line else 1
             return get_amounts_from_tag(tax_group_id) * conversion_rate
+
+        def get_base_amounts_from_tag(tax_tag_string):
+            lines = self.line_ids.filtered(lambda line: line.tax_tag_ids & get_tags(tax_tag_string))
+            if 'OSS' in tax_tag_string:
+                lines = lines.filtered(lambda line: line.tax_ids if 'Base' in tax_tag_string else not line.tax_ids)
+            return -self.direction_sign * sum(lines.mapped('price_subtotal'))
 
         def compute_p_12(tag_names):
             """
@@ -212,7 +225,7 @@ class AccountMove(models.Model):
                 'P_7': line.name,
                 'P_8A': line.product_uom_id.name or 'szt.',
                 'P_8B': line.quantity * sign,
-                'P_9A': float_repr(line.price_unit, 2),
+                'P_9A': float_repr(line.price_unit, 8),
                 'P_11': float_repr(line.price_subtotal * sign, 2),
                 'P_12': compute_p_12(tag_names),
             }
@@ -255,14 +268,17 @@ class AccountMove(models.Model):
             'float_repr': float_repr,
             'float_is_zero': float_is_zero,
             'get_vat_country': get_vat_country,
-            'get_vat_number': compact,
+            'get_vat_number': get_vat_number,
             'get_amounts_from_tag': get_amounts_from_tag,
             'get_amounts_from_tag_in_PLN_currency': get_amounts_from_tag_in_PLN_currency,
+            'get_base_amounts_from_tag': get_base_amounts_from_tag,
             'invoice_type': ksef_type,
             'related_invoices': self._l10n_pl_edi_get_related_invoices(),
             'correction_info': correction_info,
             'special_transactions': {'OSS_Base', 'OSS_Tax', 'Triangular Sale'} & invoice_tag_names,
             'triangular_transaction': '1' if 'Triangular Sale' in invoice_tag_names else '2',
+            'prefiks_podatnika': bool({'K_21', 'K_12', 'Triangular Sale'} & invoice_tag_names),
+            'reverse_charge': any(invoice_line_vals['P_12'] in ('np I', 'np II', 'oo') for invoice_line_vals in invoice_lines_vals),
         }
 
     def _l10n_pl_edi_render_xml(self):
@@ -405,9 +421,7 @@ class AccountMove(models.Model):
 
     def _cron_l10n_pl_edi_check_invoice_status(self):
         """get all moves that are in state sent run action_update_invoice_status on all of them"""
-        to_update_moves = self.env['account.move'].search([*self.env['account.move']._check_company_domain(self.env.company), ('l10n_pl_edi_status', '=', 'sent')])
-        for move in to_update_moves:
-            self.env['res.company']._with_locked_records(move)
+        for move in self.env['account.move'].search([('l10n_pl_edi_status', '=', 'sent')]):
             move.action_l10n_pl_edi_update_invoice_status()
 
     def button_draft(self):
@@ -496,7 +510,10 @@ class AccountMove(models.Model):
                     else:
                         raise UserError(self.env._("Tax corresponding to '%s' required to derive the net unit price from gross price during KSeF import was not found in the mapping.", tax_name))
                 else:
-                    raise UserError(self.env._("No net or gross unit price found in the FA (3) for the line with product '%s'.", name))
+                    price_unit = 0.0
+
+                if P_10 := get_value(line_node, '{*}P_10'):
+                    price_unit = float(Decimal(str(price_unit)) - Decimal(P_10))
 
                 lines.append(
                     {
@@ -652,27 +669,39 @@ class AccountMove(models.Model):
 
         for invoice_nr in to_process:
             response = service.get_invoice_by_ksef_number(invoice_nr)
-            if response.get('error'):
-                blocking_error = handle_download_bills_from_ksef_error(response['error'])
-                break
-            bill_data = self.l10n_pl_edi_get_ksef_bill_vals_from_xml(response['xml_content'])
+            error_msg = False
+            try:
+                if response.get('error'):
+                    blocking_error = handle_download_bills_from_ksef_error(response['error'])
+                    break
+                bill_data = self.l10n_pl_edi_get_ksef_bill_vals_from_xml(response['xml_content'])
+            except UserError as e:
+                bill_data = {'move_type': 'in_invoice'}
+                error_msg = str(e)
             bill_data['l10n_pl_edi_number'] = invoice_nr
             bills_to_create[invoice_nr] = {
                 'vals': bill_data,
-                'xml_content': response['xml_content'],
+                'xml_content': response.get('xml_content'),
+                'error_msg': error_msg,
             }
 
         created_moves = self.create([bill['vals'] for bill in bills_to_create.values()])
 
         for created_move in created_moves:
-            self.env['ir.attachment'].sudo().create({
-                'description': self.env._('KSeF Fetched Invoice XML'),
-                'name': f"KSeF-{created_move.l10n_pl_edi_number.replace('/', '_')}.xml",
-                'type': 'binary',
-                'mimetype': 'application/xml',
-                'raw': bills_to_create[created_move.l10n_pl_edi_number]['xml_content'],
-                'res_id': created_move.id,
-                'res_model': created_move._name,
-            })
+            if content := bills_to_create[created_move.l10n_pl_edi_number].get('xml_content'):
+                self.env['ir.attachment'].sudo().create({
+                    'description': self.env._('KSeF Fetched Invoice XML'),
+                    'name': f"KSeF-{created_move.l10n_pl_edi_number.replace('/', '_')}.xml",
+                    'type': 'binary',
+                    'mimetype': 'application/xml',
+                    'raw': content,
+                    'res_id': created_move.id,
+                    'res_model': created_move._name,
+                })
+
+            if error_msg := bills_to_create[created_move.l10n_pl_edi_number].get('error_msg'):
+                created_move.message_post(
+                    body=self.env._("KSeF XML failed. The bill was created empty. Reason: %s", error_msg)
+                )
 
         return blocking_error
