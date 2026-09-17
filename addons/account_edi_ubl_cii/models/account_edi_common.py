@@ -386,6 +386,9 @@ class AccountEdiCommon(models.AbstractModel):
                 base_line['quantity'] *= -1
                 base_line['price_unit'] *= -1
 
+    def _get_document_type_code_vals(self, invoice, invoice_data):
+        return {'attrs': {}, 'value': None}
+
     # -------------------------------------------------------------------------
     # TAXES
     # -------------------------------------------------------------------------
@@ -1242,10 +1245,10 @@ class AccountEdiCommon(models.AbstractModel):
         with country-specific normalization where needed.
         Should stay consistent with `_get_country_specific_vat_variants`.
         """
-        country = self._import_retrieve_country(collected_values)
+        country = self._import_retrieve_country(collected_values) or customer.country_id
         customer_vat = customer.vat.replace(' ', '').upper()
         vat_to_compare = vat.replace(' ', '').replace('.', '').upper()
-        if country.code == 'CH':
+        if country and country.code == 'CH':
             customer_vat = re.sub(r"(TVA|IVA|MWST)?$", "", customer_vat.replace('.', '').replace('-', ''))
             vat_to_compare = re.sub(r"(TVA|IVA|MWST)?$", "", vat_to_compare.replace('-', ''))
         return customer_vat == vat_to_compare
